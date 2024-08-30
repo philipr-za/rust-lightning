@@ -24,7 +24,7 @@ use bitcoin::hash_types::{Txid, PubkeyHash, WPubkeyHash};
 
 use crate::chain::chaininterface::fee_for_weight;
 use crate::chain::package::WEIGHT_REVOKED_OUTPUT;
-use crate::sign::EntropySource;
+use crate::sign::{EntropySource, SegwitSigHasher};
 use crate::ln::types::{PaymentHash, PaymentPreimage};
 use crate::ln::msgs::DecodeError;
 use crate::util::ser::{Readable, RequiredWrapper, Writeable, Writer};
@@ -1124,23 +1124,22 @@ impl BuiltCommitmentTransaction {
 	/// Get the SIGHASH_ALL sighash value of the transaction.
 	///
 	/// This can be used to verify a signature.
-	pub fn get_sighash_all(&self, funding_redeemscript: &Script, channel_value_satoshis: u64) -> Message {
-		let sighash = &sighash::SighashCache::new(&self.transaction).segwit_signature_hash(0, funding_redeemscript, channel_value_satoshis, EcdsaSighashType::All).unwrap()[..];
-		hash_to_message!(sighash)
+	pub fn get_sighash_all<S: SegwitSigHasher>(&self, funding_redeemscript: &Script, channel_value_satoshis: u64) -> Message {
+		S::get_sighash_message(&self.transaction, 0, funding_redeemscript, channel_value_satoshis, EcdsaSighashType::All)
 	}
 
 	/// Signs the counterparty's commitment transaction.
-	pub fn sign_counterparty_commitment<T: secp256k1::Signing>(&self, funding_key: &SecretKey, funding_redeemscript: &Script, channel_value_satoshis: u64, secp_ctx: &Secp256k1<T>) -> Signature {
-		let sighash = self.get_sighash_all(funding_redeemscript, channel_value_satoshis);
+	pub fn sign_counterparty_commitment<T: secp256k1::Signing, S: SegwitSigHasher>(&self, funding_key: &SecretKey, funding_redeemscript: &Script, channel_value_satoshis: u64, secp_ctx: &Secp256k1<T>) -> Signature {
+		let sighash = self.get_sighash_all::<S>(funding_redeemscript, channel_value_satoshis);
 		sign(secp_ctx, &sighash, funding_key)
 	}
 
 	/// Signs the holder commitment transaction because we are about to broadcast it.
-	pub fn sign_holder_commitment<T: secp256k1::Signing, ES: Deref>(
+	pub fn sign_holder_commitment<T: secp256k1::Signing, ES: Deref, S: SegwitSigHasher>(
 		&self, funding_key: &SecretKey, funding_redeemscript: &Script, channel_value_satoshis: u64,
 		entropy_source: &ES, secp_ctx: &Secp256k1<T>
 	) -> Signature where ES::Target: EntropySource {
-		let sighash = self.get_sighash_all(funding_redeemscript, channel_value_satoshis);
+		let sighash = self.get_sighash_all::<S>(funding_redeemscript, channel_value_satoshis);
 		sign_with_aux_rand(secp_ctx, &sighash, funding_key, entropy_source)
 	}
 }
@@ -1256,15 +1255,14 @@ impl<'a> TrustedClosingTransaction<'a> {
 	/// Get the SIGHASH_ALL sighash value of the transaction.
 	///
 	/// This can be used to verify a signature.
-	pub fn get_sighash_all(&self, funding_redeemscript: &Script, channel_value_satoshis: u64) -> Message {
-		let sighash = &sighash::SighashCache::new(&self.inner.built).segwit_signature_hash(0, funding_redeemscript, channel_value_satoshis, EcdsaSighashType::All).unwrap()[..];
-		hash_to_message!(sighash)
+	pub fn get_sighash_all<S: SegwitSigHasher>(&self, funding_redeemscript: &Script, channel_value_satoshis: u64) -> Message {
+		S::get_sighash_message(&self.inner.built, 0, funding_redeemscript, channel_value_satoshis, EcdsaSighashType::All)
 	}
 
 	/// Sign a transaction, either because we are counter-signing the counterparty's transaction or
 	/// because we are about to broadcast a holder transaction.
-	pub fn sign<T: secp256k1::Signing>(&self, funding_key: &SecretKey, funding_redeemscript: &Script, channel_value_satoshis: u64, secp_ctx: &Secp256k1<T>) -> Signature {
-		let sighash = self.get_sighash_all(funding_redeemscript, channel_value_satoshis);
+	pub fn sign<T: secp256k1::Signing, S: SegwitSigHasher>(&self, funding_key: &SecretKey, funding_redeemscript: &Script, channel_value_satoshis: u64, secp_ctx: &Secp256k1<T>) -> Signature {
+		let sighash = self.get_sighash_all::<S>(funding_redeemscript, channel_value_satoshis);
 		sign(secp_ctx, &sighash, funding_key)
 	}
 }

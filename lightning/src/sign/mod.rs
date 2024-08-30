@@ -72,6 +72,7 @@ use crate::util::atomic_counter::AtomicCounter;
 use crate::util::invoice::construct_invoice_preimage;
 use core::convert::TryInto;
 use core::ops::Deref;
+use core::marker::PhantomData;
 use core::sync::atomic::{AtomicUsize, Ordering};
 #[cfg(taproot)]
 use musig2::types::{PartialSignature, PublicNonce};
@@ -1019,7 +1020,7 @@ pub trait ChangeDestinationSource {
 /// This implementation performs no policy checks and is insufficient by itself as
 /// a secure external signer.
 #[derive(Debug)]
-pub struct InMemorySigner {
+pub struct InMemorySignerGeneric<S: SegwitSigHasher> {
 	/// Holder secret key in the 2-of-2 multisig script of a channel. This key also backs the
 	/// holder's anchor output in a commitment transaction, if one is present.
 	pub funding_key: SecretKey,
@@ -1043,9 +1044,14 @@ pub struct InMemorySigner {
 	channel_keys_id: [u8; 32],
 	/// A source of random bytes.
 	entropy_source: RandomBytes,
+	/// Which sighasher do we use for signing.
+	_phantom_sighasher: PhantomData<S>
 }
 
-impl PartialEq for InMemorySigner {
+/// Standard InMemorySigner
+pub type InMemorySigner = InMemorySignerGeneric<BitcoinSigHasher>;
+
+impl<S: SegwitSigHasher> PartialEq for InMemorySignerGeneric<S> {
 	fn eq(&self, other: &Self) -> bool {
 		self.funding_key == other.funding_key
 			&& self.revocation_base_key == other.revocation_base_key
@@ -1060,7 +1066,7 @@ impl PartialEq for InMemorySigner {
 	}
 }
 
-impl Clone for InMemorySigner {
+impl<S: SegwitSigHasher> Clone for InMemorySignerGeneric<S> {
 	fn clone(&self) -> Self {
 		Self {
 			funding_key: self.funding_key.clone(),
@@ -1074,27 +1080,51 @@ impl Clone for InMemorySigner {
 			channel_value_satoshis: self.channel_value_satoshis,
 			channel_keys_id: self.channel_keys_id,
 			entropy_source: RandomBytes::new(self.get_secure_random_bytes()),
+			_phantom_sighasher: Default::default(),
 		}
 	}
 }
 
-impl InMemorySigner {
+impl<S: SegwitSigHasher> InMemorySignerGeneric<S> {
 	/// Creates a new [`InMemorySigner`].
 	pub fn new<C: Signing>(
 		secp_ctx: &Secp256k1<C>, funding_key: SecretKey, revocation_base_key: SecretKey,
 		payment_key: SecretKey, delayed_payment_base_key: SecretKey, htlc_base_key: SecretKey,
 		commitment_seed: [u8; 32], channel_value_satoshis: u64, channel_keys_id: [u8; 32],
 		rand_bytes_unique_start: [u8; 32],
-	) -> InMemorySigner {
-		let holder_channel_pubkeys = InMemorySigner::make_holder_keys(
+	) -> InMemorySignerGeneric<BitcoinSigHasher> {
+		Self::new_with_sighasher(
 			secp_ctx,
-			&funding_key,
-			&revocation_base_key,
-			&payment_key,
-			&delayed_payment_base_key,
-			&htlc_base_key,
-		);
-		InMemorySigner {
+			funding_key,
+			revocation_base_key,
+			payment_key,
+			delayed_payment_base_key,
+			htlc_base_key,
+			commitment_seed,
+			channel_value_satoshis,
+			channel_keys_id,
+			rand_bytes_unique_start,
+		)
+	}
+
+	/// Creates a new [`InMemorySigner`].
+	pub fn new_with_sighasher<C: Signing, NS: SegwitSigHasher>(
+		secp_ctx: &Secp256k1<C>,
+		funding_key: SecretKey,
+		revocation_base_key: SecretKey,
+		payment_key: SecretKey,
+		delayed_payment_base_key: SecretKey,
+		htlc_base_key: SecretKey,
+		commitment_seed: [u8; 32],
+		channel_value_satoshis: u64,
+		channel_keys_id: [u8; 32],
+		rand_bytes_unique_start: [u8; 32],
+	) -> InMemorySignerGeneric<NS> {
+		let holder_channel_pubkeys =
+			InMemorySignerGeneric::<NS>::make_holder_keys(secp_ctx, &funding_key, &revocation_base_key,
+											 &payment_key, &delayed_payment_base_key,
+											 &htlc_base_key);
+		InMemorySignerGeneric {
 			funding_key,
 			revocation_base_key,
 			payment_key,
@@ -1106,6 +1136,7 @@ impl InMemorySigner {
 			channel_parameters: None,
 			channel_keys_id,
 			entropy_source: RandomBytes::new(rand_bytes_unique_start),
+			_phantom_sighasher: Default::default(),
 		}
 	}
 
@@ -1231,16 +1262,9 @@ impl InMemorySigner {
 		} else {
 			ScriptBuf::new_p2pkh(&remotepubkey.pubkey_hash())
 		};
-		let sighash = hash_to_message!(
-			&sighash::SighashCache::new(spend_tx)
-				.segwit_signature_hash(
-					input_idx,
-					&witness_script,
-					descriptor.output.value,
-					EcdsaSighashType::All
-				)
-				.unwrap()[..]
-		);
+
+		let sighash = S::get_sighash_message(spend_tx, input_idx, &witness_script, descriptor.output.value, EcdsaSighashType::All);
+
 		let remotesig = sign_with_aux_rand(secp_ctx, &sighash, &self.payment_key, &self);
 		let payment_script = if supports_anchors_zero_fee_htlc_tx {
 			witness_script.to_v0_p2wsh()
@@ -1307,16 +1331,7 @@ impl InMemorySigner {
 			descriptor.to_self_delay,
 			&delayed_payment_pubkey,
 		);
-		let sighash = hash_to_message!(
-			&sighash::SighashCache::new(spend_tx)
-				.segwit_signature_hash(
-					input_idx,
-					&witness_script,
-					descriptor.output.value,
-					EcdsaSighashType::All
-				)
-				.unwrap()[..]
-		);
+		let sighash = S::get_sighash_message(spend_tx, input_idx, &witness_script, descriptor.output.value, EcdsaSighashType::All);
 		let local_delayedsig = EcdsaSignature {
 			sig: sign_with_aux_rand(secp_ctx, &sighash, &delayed_payment_key, &self),
 			hash_ty: EcdsaSighashType::All,
@@ -1336,13 +1351,13 @@ impl InMemorySigner {
 	}
 }
 
-impl EntropySource for InMemorySigner {
+impl<S: SegwitSigHasher> EntropySource for InMemorySignerGeneric<S> {
 	fn get_secure_random_bytes(&self) -> [u8; 32] {
 		self.entropy_source.get_secure_random_bytes()
 	}
 }
 
-impl ChannelSigner for InMemorySigner {
+impl<S: SegwitSigHasher> ChannelSigner for InMemorySignerGeneric<S> {
 	fn get_per_commitment_point(
 		&self, idx: u64, secp_ctx: &Secp256k1<secp256k1::All>,
 	) -> PublicKey {
@@ -1392,7 +1407,7 @@ impl ChannelSigner for InMemorySigner {
 const MISSING_PARAMS_ERR: &'static str =
 	"ChannelSigner::provide_channel_parameters must be called before signing operations";
 
-impl EcdsaChannelSigner for InMemorySigner {
+impl<S: SegwitSigHasher>  EcdsaChannelSigner for InMemorySignerGeneric<S>{
 	fn sign_counterparty_commitment(
 		&self, commitment_tx: &CommitmentTransaction,
 		_inbound_htlc_preimages: Vec<PaymentPreimage>,
@@ -1407,7 +1422,7 @@ impl EcdsaChannelSigner for InMemorySigner {
 			make_funding_redeemscript(&funding_pubkey, &counterparty_keys.funding_pubkey);
 
 		let built_tx = trusted_tx.built_transaction();
-		let commitment_sig = built_tx.sign_counterparty_commitment(
+		let commitment_sig = built_tx.sign_counterparty_commitment::<_, S>(
 			&self.funding_key,
 			&channel_funding_redeemscript,
 			self.channel_value_satoshis,
@@ -1436,21 +1451,13 @@ impl EcdsaChannelSigner for InMemorySigner {
 			} else {
 				EcdsaSighashType::All
 			};
-			let htlc_sighash = hash_to_message!(
-				&sighash::SighashCache::new(&htlc_tx)
-					.segwit_signature_hash(
-						0,
-						&htlc_redeemscript,
-						htlc.amount_msat / 1000,
-						htlc_sighashtype
-					)
-					.unwrap()[..]
-			);
+			let htlc_sighash = S::get_sighash_message(&htlc_tx, 0, &htlc_redeemscript, htlc.amount_msat / 1000, htlc_sighashtype);
 			let holder_htlc_key = chan_utils::derive_private_key(
 				&secp_ctx,
 				&keys.per_commitment_point,
 				&self.htlc_base_key,
 			);
+			
 			htlc_sigs.push(sign(secp_ctx, &htlc_sighash, &holder_htlc_key));
 		}
 
@@ -1465,7 +1472,7 @@ impl EcdsaChannelSigner for InMemorySigner {
 		let funding_redeemscript =
 			make_funding_redeemscript(&funding_pubkey, &counterparty_keys.funding_pubkey);
 		let trusted_tx = commitment_tx.trust();
-		Ok(trusted_tx.built_transaction().sign_holder_commitment(
+		Ok(trusted_tx.built_transaction().sign_holder_commitment::<_,_,S>(
 			&self.funding_key,
 			&funding_redeemscript,
 			self.channel_value_satoshis,
@@ -1483,7 +1490,7 @@ impl EcdsaChannelSigner for InMemorySigner {
 		let funding_redeemscript =
 			make_funding_redeemscript(&funding_pubkey, &counterparty_keys.funding_pubkey);
 		let trusted_tx = commitment_tx.trust();
-		Ok(trusted_tx.built_transaction().sign_holder_commitment(
+		Ok(trusted_tx.built_transaction().sign_holder_commitment::<_,_,S>(
 			&self.funding_key,
 			&funding_redeemscript,
 			self.channel_value_satoshis,
@@ -1522,13 +1529,10 @@ impl EcdsaChannelSigner for InMemorySigner {
 				&counterparty_delayedpubkey,
 			)
 		};
-		let mut sighash_parts = sighash::SighashCache::new(justice_tx);
-		let sighash = hash_to_message!(
-			&sighash_parts
-				.segwit_signature_hash(input, &witness_script, amount, EcdsaSighashType::All)
-				.unwrap()[..]
-		);
-		return Ok(sign_with_aux_rand(secp_ctx, &sighash, &revocation_key, &self));
+
+		let sighash = S::get_sighash_message(&justice_tx, input, &witness_script, amount, EcdsaSighashType::All);
+
+		return Ok(sign_with_aux_rand(secp_ctx, &sighash, &revocation_key, &self))
 	}
 
 	fn sign_justice_revoked_htlc(
@@ -1567,13 +1571,8 @@ impl EcdsaChannelSigner for InMemorySigner {
 				&revocation_pubkey,
 			)
 		};
-		let mut sighash_parts = sighash::SighashCache::new(justice_tx);
-		let sighash = hash_to_message!(
-			&sighash_parts
-				.segwit_signature_hash(input, &witness_script, amount, EcdsaSighashType::All)
-				.unwrap()[..]
-		);
-		return Ok(sign_with_aux_rand(secp_ctx, &sighash, &revocation_key, &self));
+		let sighash = S::get_sighash_message(&justice_tx, input, &witness_script, amount, EcdsaSighashType::All);
+		return Ok(sign_with_aux_rand(secp_ctx, &sighash, &revocation_key, &self))
 	}
 
 	fn sign_holder_htlc_transaction(
@@ -1581,20 +1580,12 @@ impl EcdsaChannelSigner for InMemorySigner {
 		secp_ctx: &Secp256k1<secp256k1::All>,
 	) -> Result<Signature, ()> {
 		let witness_script = htlc_descriptor.witness_script(secp_ctx);
-		let sighash = &sighash::SighashCache::new(&*htlc_tx)
-			.segwit_signature_hash(
-				input,
-				&witness_script,
-				htlc_descriptor.htlc.amount_msat / 1000,
-				EcdsaSighashType::All,
-			)
-			.map_err(|_| ())?;
+		let sighash = S::get_sighash_message(&*htlc_tx, input, &witness_script, htlc_descriptor.htlc.amount_msat / 1000, EcdsaSighashType::All);
 		let our_htlc_private_key = chan_utils::derive_private_key(
 			&secp_ctx,
 			&htlc_descriptor.per_commitment_point,
 			&self.htlc_base_key,
 		);
-		let sighash = hash_to_message!(sighash.as_byte_array());
 		Ok(sign_with_aux_rand(&secp_ctx, &sighash, &our_htlc_private_key, &self))
 	}
 
@@ -1625,12 +1616,8 @@ impl EcdsaChannelSigner for InMemorySigner {
 			&htlcpubkey,
 			&revocation_pubkey,
 		);
-		let mut sighash_parts = sighash::SighashCache::new(htlc_tx);
-		let sighash = hash_to_message!(
-			&sighash_parts
-				.segwit_signature_hash(input, &witness_script, amount, EcdsaSighashType::All)
-				.unwrap()[..]
-		);
+		let sighash = S::get_sighash_message(&htlc_tx, input, &witness_script, amount, EcdsaSighashType::All);
+
 		Ok(sign_with_aux_rand(secp_ctx, &sighash, &htlc_key, &self))
 	}
 
@@ -1642,7 +1629,7 @@ impl EcdsaChannelSigner for InMemorySigner {
 			&self.counterparty_pubkeys().expect(MISSING_PARAMS_ERR).funding_pubkey;
 		let channel_funding_redeemscript =
 			make_funding_redeemscript(&funding_pubkey, counterparty_funding_key);
-		Ok(closing_tx.trust().sign(
+		Ok(closing_tx.trust().sign::<_,S>(
 			&self.funding_key,
 			&channel_funding_redeemscript,
 			self.channel_value_satoshis,
@@ -1655,15 +1642,8 @@ impl EcdsaChannelSigner for InMemorySigner {
 	) -> Result<Signature, ()> {
 		let witness_script =
 			chan_utils::get_anchor_redeemscript(&self.holder_channel_pubkeys.funding_pubkey);
-		let sighash = sighash::SighashCache::new(&*anchor_tx)
-			.segwit_signature_hash(
-				input,
-				&witness_script,
-				ANCHOR_OUTPUT_VALUE_SATOSHI,
-				EcdsaSighashType::All,
-			)
-			.unwrap();
-		Ok(sign_with_aux_rand(secp_ctx, &hash_to_message!(&sighash[..]), &self.funding_key, &self))
+		let sighash = S::get_sighash_message(&*anchor_tx, input, &witness_script, ANCHOR_OUTPUT_VALUE_SATOSHI, EcdsaSighashType::All);
+		Ok(sign_with_aux_rand(secp_ctx, &sighash, &self.funding_key, &self))
 	}
 
 	fn sign_channel_announcement_with_funding_key(
@@ -1764,9 +1744,9 @@ impl Writeable for InMemorySigner {
 	}
 }
 
-impl<ES: Deref> ReadableArgs<ES> for InMemorySigner
-where
-	ES::Target: EntropySource,
+impl<ES: Deref, S: SegwitSigHasher> ReadableArgs<ES> for InMemorySignerGeneric<S>
+where 
+    ES::Target: EntropySource 
 {
 	fn read<R: io::Read>(reader: &mut R, entropy_source: ES) -> Result<Self, DecodeError> {
 		let _ver = read_ver_prefix!(reader, SERIALIZATION_VERSION);
@@ -1792,7 +1772,7 @@ where
 
 		read_tlv_fields!(reader, {});
 
-		Ok(InMemorySigner {
+		Ok(InMemorySignerGeneric {
 			funding_key,
 			revocation_base_key,
 			payment_key,
@@ -1804,6 +1784,7 @@ where
 			channel_parameters: counterparty_channel_data,
 			channel_keys_id: keys_id,
 			entropy_source: RandomBytes::new(entropy_source.get_secure_random_bytes()),
+			_phantom_sighasher: Default::default(),
 		})
 	}
 }
@@ -2494,6 +2475,45 @@ impl EntropySource for RandomBytes {
 #[test]
 pub fn dyn_sign() {
 	let _signer: Box<dyn EcdsaChannelSigner>;
+}
+
+/// Trait to generalize a Segwit SigHasher
+pub trait SegwitSigHasher: Clone + Send + Sync {
+	/// Generate segwit sighash
+	fn get_sighash_message(tx: &Transaction, input_index: usize, script_code: &Script, value: u64, sighash_type: EcdsaSighashType) -> bitcoin::secp256k1::Message {
+		let mut sighash_parts = sighash::SighashCache::new(tx);
+		hash_to_message!(&sighash_parts.segwit_signature_hash(input_index, &script_code, value, sighash_type).unwrap()[..])
+	}
+}
+
+/// Standard Bitcoin sighasher
+#[derive(Clone)]
+pub struct BitcoinSigHasher;
+
+impl SegwitSigHasher for BitcoinSigHasher {}
+
+
+/// A Sighasher for producing Elements Sighashes, first canonically maps the transaction to an elements tx and then calculates the sighash
+#[derive(Clone)]
+#[cfg(feature = "elements")]
+pub struct ElementsSigHasher {}
+
+#[cfg(feature = "elements")]
+impl SegwitSigHasher for ElementsSigHasher {
+	fn get_sighash_message(tx: &Transaction, input_index: usize, script_code: &Script, value: u64, sighash_type: EcdsaSighashType) -> bitcoin::secp256k1::Message {
+		let elements_tx = elements::Transaction::from(tx.clone());
+		let mut elements_sighash_parts = elements::sighash::SighashCache::new(&elements_tx);
+		let elements_sighash_type = elements::EcdsaSighashType::from_u32(sighash_type.to_u32());
+		let elements_script = elements::Script::from(script_code.as_bytes().to_vec());
+		hash_to_message!(
+			&elements_sighash_parts.segwitv0_sighash(
+				input_index,
+				&elements_script,
+				elements::confidential::Value::Explicit(value),
+				elements_sighash_type
+			)[..]
+		)
+	}
 }
 
 #[cfg(ldk_bench)]
