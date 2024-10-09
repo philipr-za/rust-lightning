@@ -1125,7 +1125,7 @@ impl BuiltCommitmentTransaction {
 	///
 	/// This can be used to verify a signature.
 	pub fn get_sighash_all<S: SegwitSigHasher>(&self, funding_redeemscript: &Script, channel_value_satoshis: u64) -> Message {
-		S::get_sighash_message(&self.transaction, 0, funding_redeemscript, channel_value_satoshis, EcdsaSighashType::All)
+		S::new().get_sighash_message(&self.transaction, 0, funding_redeemscript, channel_value_satoshis, EcdsaSighashType::All)
 	}
 
 	/// Signs the counterparty's commitment transaction.
@@ -1256,7 +1256,7 @@ impl<'a> TrustedClosingTransaction<'a> {
 	///
 	/// This can be used to verify a signature.
 	pub fn get_sighash_all<S: SegwitSigHasher>(&self, funding_redeemscript: &Script, channel_value_satoshis: u64) -> Message {
-		S::get_sighash_message(&self.inner.built, 0, funding_redeemscript, channel_value_satoshis, EcdsaSighashType::All)
+		S::new().get_sighash_message(&self.inner.built, 0, funding_redeemscript, channel_value_satoshis, EcdsaSighashType::All)
 	}
 
 	/// Sign a transaction, either because we are counter-signing the counterparty's transaction or
