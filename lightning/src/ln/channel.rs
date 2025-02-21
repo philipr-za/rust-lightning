@@ -55,7 +55,7 @@ use crate::chain::chaininterface::{FeeEstimator, ConfirmationTarget, LowerBounde
 use crate::chain::channelmonitor::{ChannelMonitor, ChannelMonitorUpdate, ChannelMonitorUpdateStep, LATENCY_GRACE_PERIOD_BLOCKS};
 use crate::chain::transaction::{OutPoint, TransactionData};
 use crate::sign::ecdsa::EcdsaChannelSigner;
-use crate::sign::{EntropySource, ChannelSigner, SignerProvider, NodeSigner, Recipient};
+use crate::sign::{EntropySource, ChannelSigner, SignerProvider, NodeSigner, Recipient, BitcoinSigHasher};
 use crate::events::{ClosureReason, Event};
 use crate::routing::gossip::NodeId;
 use crate::util::ser::{Readable, ReadableArgs, TransactionU16LenLimited, Writeable, Writer};
@@ -5018,7 +5018,7 @@ impl<SP: Deref> Channel<SP> where
 		let commitment_txid = {
 			let trusted_tx = commitment_stats.tx.trust();
 			let bitcoin_tx = trusted_tx.built_transaction();
-			let sighash = bitcoin_tx.get_sighash_all(&funding_script, self.context.channel_value_satoshis);
+			let sighash = bitcoin_tx.get_sighash_all::<BitcoinSigHasher>(&funding_script, self.context.channel_value_satoshis);
 
 			log_trace!(logger, "Checking commitment tx signature {} by key {} against tx {} (sighash {}) with redeemscript {} in channel {}",
 				log_bytes!(msg.signature.serialize_compact()[..]),
@@ -6823,7 +6823,7 @@ impl<SP: Deref> Channel<SP> where
 		if used_total_fee != msg.fee_satoshis {
 			return Err(ChannelError::close(format!("Remote sent us a closing_signed with a fee other than the value they can claim. Fee in message: {}. Actual closing tx fee: {}", msg.fee_satoshis, used_total_fee)));
 		}
-		let sighash = closing_tx.trust().get_sighash_all(&funding_redeemscript, self.context.channel_value_satoshis);
+		let sighash = closing_tx.trust().get_sighash_all::<BitcoinSigHasher>(&funding_redeemscript, self.context.channel_value_satoshis);
 
 		match self.context.secp_ctx.verify_ecdsa(&sighash, &msg.signature, &self.context.get_counterparty_pubkeys().funding_pubkey) {
 			Ok(_) => {},
@@ -6831,8 +6831,8 @@ impl<SP: Deref> Channel<SP> where
 				// The remote end may have decided to revoke their output due to inconsistent dust
 				// limits, so check for that case by re-checking the signature here.
 				skip_remote_output = true;
-				closing_tx = self.build_closing_transaction(msg.fee_satoshis, skip_remote_output)?.0;
-				let sighash = closing_tx.trust().get_sighash_all(&funding_redeemscript, self.context.channel_value_satoshis);
+				closing_tx = self.build_closing_transaction(msg.fee_satoshis, skip_remote_output).0;
+				let sighash = closing_tx.trust().get_sighash_all::<BitcoinSigHasher>(&funding_redeemscript, self.context.channel_value_satoshis);
 				secp_check!(self.context.secp_ctx.verify_ecdsa(&sighash, &msg.signature, self.context.counterparty_funding_pubkey()), "Invalid closing tx signature from peer".to_owned());
 			},
 		};

@@ -32,6 +32,8 @@ grind_signatures = []
 
 default = ["std", "grind_signatures"]
 
+elements = ["dep:elements"]
+
 [dependencies]
 lightning-types = { version = "0.2.0", path = "../lightning-types", default-features = false }
 lightning-invoice = { version = "0.33.0", path = "../lightning-invoice", default-features = false }
@@ -47,6 +49,8 @@ regex = { version = "1.5.6", optional = true }
 backtrace = { version = "0.3", optional = true }
 
 libm = { version = "0.2", default-features = false }
+
+elements = { git = "https://github.com/philipr-za/rust-elements.git", branch = "philip-vls-updates", optional = true }
 
 [dev-dependencies]
 regex = "1.5.6"
